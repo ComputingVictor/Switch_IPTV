@@ -1,1 +1,26 @@
-config/settings.ini
+# Build directories
+/build/
+/build-host/
+/cmake-build-*/
+
+# Generated Nintendo Switch binaries
+/*.elf
+/*.nacp
+/*.nro
+/*.map
+
+# Generated packages
+/dist/
+
+# Local user configuration and playlists
+/config/settings.ini
+*.m3u
+*.m3u8
+
+# Editor and operating-system files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.gh-cli/
+*.user

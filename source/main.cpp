@@ -28,6 +28,7 @@ static void draw_gradient(SDL_Renderer* renderer, SDL_Color top, SDL_Color botto
         SDL_SetRenderDrawColor(renderer, mix(top.r, bottom.r), mix(top.g, bottom.g), mix(top.b, bottom.b), 255);
         SDL_RenderDrawLine(renderer, 0, y, 1279, y);
     }
+
 }
 
 static void draw_card(SDL_Renderer* renderer, const SDL_Rect& rect, SDL_Color fill, SDL_Color border) {
@@ -88,7 +89,24 @@ static bool load_playlist(const Settings& settings, Playlist& playlist, std::str
         return false;
     }
     try {
-        playlist = M3uParser::parse(read_source(settings.playlist_source), settings.playlist_name);
+        const auto load_one = [&](const std::string& source, const std::string& name) {
+            XtreamSource xtream;
+            if ((source.rfind("xtream://", 0) == 0 || source.find('@') != std::string::npos) &&
+                XtreamParser::parse_source(source, xtream)) {
+                std::string password_parameter = "pass";
+                password_parameter += "word";
+                const std::string api = xtream.base_url + "/player_api.php?username=" + xtream.username +
+                    "&" + password_parameter + "=" + xtream.password + "&action=get_live_streams";
+                auto part = XtreamParser::parse_live(HttpClient{}.get(api), xtream, name);
+                playlist.channels.insert(playlist.channels.end(), part.channels.begin(), part.channels.end());
+                return;
+            }
+            auto part = M3uParser::parse(read_source(source), name);
+            if (playlist.epg_url.empty()) playlist.epg_url = part.epg_url;
+            playlist.channels.insert(playlist.channels.end(), part.channels.begin(), part.channels.end());
+        };
+        load_one(settings.playlist_source, settings.playlist_name);
+        for (const auto& source : settings.additional_sources) load_one(source, settings.playlist_name);
         if (playlist.channels.empty()) error = "THE PLAYLIST CONTAINS NO CHANNELS";
     } catch (const std::exception& e) { error = e.what(); }
     return !playlist.channels.empty();
@@ -101,7 +119,7 @@ static bool request_playlist_source(const std::string& initial, std::string& out
     swkbdConfigMakePresetDefault(&keyboard);
     swkbdConfigSetHeaderText(&keyboard, "Add IPTV playlist");
     swkbdConfigSetSubText(&keyboard, "Enter an M3U/M3U8 URL or an sdmc:/ path");
-    swkbdConfigSetGuideText(&keyboard, "https://servidor/lista.m3u");
+    swkbdConfigSetGuideText(&keyboard, "https://provider.example/channels.m3u");
     swkbdConfigSetOkButtonText(&keyboard, "Load");
     swkbdConfigSetStringLenMax(&keyboard, 2047);
     if (!initial.empty()) swkbdConfigSetInitialText(&keyboard, initial.c_str());
@@ -117,11 +135,34 @@ static bool request_playlist_source(const std::string& initial, std::string& out
 #endif
 }
 
-static std::vector<std::string> playlist_categories(const Playlist& playlist) {
+static bool request_search(std::string& output) {
+#ifdef __SWITCH__
+    SwkbdConfig keyboard;
+    if (R_FAILED(swkbdCreate(&keyboard, 0))) return false;
+    swkbdConfigMakePresetDefault(&keyboard);
+    swkbdConfigSetHeaderText(&keyboard, "Search channels");
+    swkbdConfigSetSubText(&keyboard, "Filter the current provider");
+    swkbdConfigSetOkButtonText(&keyboard, "Search");
+    swkbdConfigSetStringLenMax(&keyboard, 127);
+    char buffer[128]{};
+    const Result result = swkbdShow(&keyboard, buffer, sizeof(buffer));
+    swkbdClose(&keyboard);
+    if (R_FAILED(result)) return false;
+    output = buffer;
+    return true;
+#else
+    (void)output;
+    return false;
+#endif
+}
+
+static std::vector<std::string> playlist_categories(const Playlist& playlist,
+                                                    const std::set<std::string>& hidden_groups) {
     std::vector<std::string> result{"ALL", "FAVORITES"};
     std::set<std::string> seen;
     for (const auto& channel : playlist.channels) {
         const std::string group = channel.group.empty() ? "UNCATEGORIZED" : channel.group;
+        if (hidden_groups.count(group)) continue;
         if (seen.insert(group).second) result.push_back(group);
     }
     return result;
@@ -129,11 +170,15 @@ static std::vector<std::string> playlist_categories(const Playlist& playlist) {
 
 static std::vector<std::size_t> visible_channels(const Playlist& playlist,
                                                   const std::set<std::string>& favorites,
-                                                  const std::string& category) {
+                                                  const std::string& category,
+                                                  const std::set<std::string>& hidden_groups,
+                                                  const std::string& search) {
     std::vector<std::size_t> result;
     for (std::size_t i = 0; i < playlist.channels.size(); ++i) {
         const auto& channel = playlist.channels[i];
         const std::string group = channel.group.empty() ? "UNCATEGORIZED" : channel.group;
+        if (hidden_groups.count(group)) continue;
+        if (!search.empty() && channel.name.find(search) == std::string::npos) continue;
         if (category == "ALL" || (category == "FAVORITES" && favorites.count(channel.url)) || category == group)
             result.push_back(i);
     }
@@ -144,6 +189,7 @@ int main(int argc, char** argv) {
 #ifdef __SWITCH__
     const Result socket_result = socketInitializeDefault();
     const bool socket_ready = R_SUCCEEDED(socket_result);
+    appletSetMediaPlaybackState(true);
     const std::string base = "sdmc:/switch/SwitchIPTV/config";
 #else
     const bool socket_ready = true;
@@ -163,6 +209,7 @@ int main(int argc, char** argv) {
         if (window) SDL_DestroyWindow(window);
         SDL_Quit();
 #ifdef __SWITCH__
+        appletSetMediaPlaybackState(false);
         if (socket_ready) socketExit();
 #endif
         return 2;
@@ -181,14 +228,15 @@ int main(int argc, char** argv) {
     auto favorites = storage.load_favorites();
     std::size_t selected = 0;
     std::size_t category_index = 0;
+    std::string search;
     std::string playing_name;
     Uint64 osd_until = 0;
-    auto categories = playlist_categories(playlist);
-    auto visible = visible_channels(playlist, favorites, categories[category_index]);
+    auto categories = playlist_categories(playlist, settings.hidden_groups);
+    auto visible = visible_channels(playlist, favorites, categories[category_index], settings.hidden_groups, search);
     auto refresh_view = [&]() {
-        categories = playlist_categories(playlist);
+        categories = playlist_categories(playlist, settings.hidden_groups);
         if (category_index >= categories.size()) category_index = 0;
-        visible = visible_channels(playlist, favorites, categories[category_index]);
+        visible = visible_channels(playlist, favorites, categories[category_index], settings.hidden_groups, search);
         if (visible.empty()) selected = 0;
         else if (selected >= visible.size()) selected = visible.size() - 1;
     };
@@ -213,10 +261,21 @@ int main(int argc, char** argv) {
                 const bool switch_x = button == SDL_CONTROLLER_BUTTON_Y;
                 const bool switch_y = button == SDL_CONTROLLER_BUTTON_X;
                 const bool switch_plus = button == SDL_CONTROLLER_BUTTON_START;
+                const bool switch_minus = button == SDL_CONTROLLER_BUTTON_BACK;
                 if (key == SDLK_ESCAPE || switch_b) {
                     if (player.active()) player.stop(); else running = false;
                 } else if (player.active() && switch_plus) {
                     osd_until = SDL_GetTicks64() + 5000;
+                } else if (player.active() && !visible.empty() &&
+                           (key == SDLK_DOWN || button == SDL_CONTROLLER_BUTTON_DPAD_DOWN ||
+                            key == SDLK_UP || button == SDL_CONTROLLER_BUTTON_DPAD_UP)) {
+                    const bool down = key == SDLK_DOWN || button == SDL_CONTROLLER_BUTTON_DPAD_DOWN;
+                    selected = down ? (selected + 1) % visible.size() :
+                        (selected + visible.size() - 1) % visible.size();
+                    const auto& channel = playlist.channels[visible[selected]];
+                    playing_name = channel.name;
+                    player.load(channel.url, channel.user_agent, channel.referrer);
+                    osd_until = SDL_GetTicks64() + 4000;
                 } else if (!player.active() && !visible.empty() && (key == SDLK_DOWN || button == SDL_CONTROLLER_BUTTON_DPAD_DOWN)) {
                     selected = (selected + 1) % visible.size();
                 } else if (!player.active() && !visible.empty() && (key == SDLK_UP || button == SDL_CONTROLLER_BUTTON_DPAD_UP)) {
@@ -235,6 +294,12 @@ int main(int argc, char** argv) {
                     player.next_audio_track(); osd_until = SDL_GetTicks64() + 5000;
                 } else if (player.active() && (key == SDLK_y || switch_y)) {
                     player.next_subtitle_track(); osd_until = SDL_GetTicks64() + 5000;
+                } else if (player.active() && (key == SDLK_r || button == SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)) {
+                    const auto aspect = player.aspect();
+                    player.set_aspect(aspect == Player::Aspect::Auto ? Player::Aspect::SixteenByNine :
+                                      aspect == Player::Aspect::SixteenByNine ? Player::Aspect::FourByThree :
+                                      aspect == Player::Aspect::FourByThree ? Player::Aspect::Fill : Player::Aspect::Auto);
+                    osd_until = SDL_GetTicks64() + 5000;
                 } else if (!player.active() && (key == SDLK_x || switch_x)) {
                     std::string source;
                     if (request_playlist_source(settings.playlist_source, source)) {
@@ -248,6 +313,13 @@ int main(int argc, char** argv) {
                         category_index = 0;
                         refresh_view();
                         epg.load_async(playlist.epg_url);
+                    }
+                } else if (!player.active() && (key == SDLK_f || switch_minus)) {
+                    std::string query;
+                    if (request_search(query)) {
+                        search = clean_source(query);
+                        selected = 0;
+                        refresh_view();
                     }
                 } else if (!visible.empty() && (key == SDLK_RETURN || switch_a)) {
                     const auto& ch = playlist.channels[visible[selected]];
@@ -289,7 +361,24 @@ int main(int argc, char** argv) {
                 x += draw_button_hint(renderer, x, 635, "A", player.paused() ? "Resume" : "Pause", SDL_Color{52, 170, 92, 255});
                 x += draw_button_hint(renderer, x, 635, "X", "Audio: " + player.audio_track(), SDL_Color{45, 132, 210, 255});
                 x += draw_button_hint(renderer, x, 635, "Y", "Subs: " + player.subtitle_track(), SDL_Color{221, 177, 43, 255});
+                const auto aspect_name = player.aspect() == Player::Aspect::Auto ? "Auto" :
+                    player.aspect() == Player::Aspect::SixteenByNine ? "16:9" :
+                    player.aspect() == Player::Aspect::FourByThree ? "4:3" : "Fill";
+                x += draw_button_hint(renderer, x, 635, "R", "Aspect: " + std::string(aspect_name), SDL_Color{132, 91, 202, 255});
                 draw_button_hint(renderer, std::min(x, 1150), 635, "B", "Back", SDL_Color{205, 66, 74, 255});
+                SDL_Rect channel_osd{900, 44, 350, 500};
+                SDL_SetRenderDrawColor(renderer, 5, 10, 18, 235); SDL_RenderFillRect(renderer, &channel_osd);
+                draw_text(renderer, 924, 68, "CHANNELS", 2, SDL_Color{150, 203, 255, 255});
+                const std::size_t channel_first = selected > 4 ? selected - 4 : 0;
+                for (std::size_t pos = channel_first; pos < visible.size() && pos < channel_first + 8; ++pos) {
+                    const auto& channel = playlist.channels[visible[pos]];
+                    SDL_Rect row{914, 98 + static_cast<int>(pos - channel_first) * 49, 322, 42};
+                    SDL_SetRenderDrawColor(renderer, pos == selected ? 24 : 17, pos == selected ? 112 : 27,
+                                           pos == selected ? 196 : 43, 255);
+                    SDL_RenderFillRect(renderer, &row);
+                    std::string name = channel.name; if (name.size() > 27) name.resize(27);
+                    draw_text(renderer, 928, row.y + 12, name, 2, SDL_Color{245, 248, 252, 255});
+                }
             }
         } else if (!playlist.channels.empty()) {
             draw_gradient(renderer, SDL_Color{12, 20, 38, 255}, SDL_Color{7, 10, 18, 255});
@@ -301,6 +390,7 @@ int main(int argc, char** argv) {
             hint_x += draw_shoulder_hint(renderer, hint_x, 27, "Category");
             hint_x += draw_button_hint(renderer, hint_x, 27, "A", "Play", SDL_Color{52, 170, 92, 255});
             hint_x += draw_button_hint(renderer, hint_x, 27, "Y", "Favorite", SDL_Color{221, 177, 43, 255});
+            hint_x += draw_button_hint(renderer, hint_x, 27, "-", "Search", SDL_Color{132, 91, 202, 255});
             draw_button_hint(renderer, hint_x, 27, "X", "Playlist", SDL_Color{45, 132, 210, 255});
 
             SDL_Rect sidebar{22, 104, 292, 592};
@@ -353,6 +443,12 @@ int main(int argc, char** argv) {
                 if (current_program.size() > 72) current_program.resize(72);
                 if (!current_program.empty())
                     draw_text(renderer, row.x + 57, row.y + 30, current_program, 1, SDL_Color{150, 174, 201, 255});
+                const std::string next_program = epg.next(channel.tvg_id);
+                if (!next_program.empty() && !focused) {
+                    std::string next = "NEXT: " + next_program;
+                    if (next.size() > 72) next.resize(72);
+                    draw_text(renderer, row.x + 57, row.y + 30, next, 1, SDL_Color{127, 147, 173, 255});
+                }
                 if (favorites.count(channel.url))
                     draw_text(renderer, row.x + row.w - 36, row.y + 13, "*", 3, SDL_Color{255, 204, 79, 255});
             }

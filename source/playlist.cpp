@@ -60,6 +60,58 @@ bool truthy(std::string value) {
     });
     return value == "1" || value == "true" || value == "yes";
 }
+
+std::string json_string(const std::string& object, const char* key) {
+    const std::string needle = "\"" + std::string(key) + "\"";
+    const auto key_pos = object.find(needle);
+    if (key_pos == std::string::npos) return {};
+    auto p = object.find(':', key_pos + needle.size());
+    if (p == std::string::npos) return {};
+    const auto begin = object.find_first_not_of(" \t\r\n", p + 1);
+    if (begin == std::string::npos) return {};
+    if (object[begin] != '"') {
+        const auto end = object.find_first_of(",}", begin);
+        return object.substr(begin, end == std::string::npos ? end : end - begin);
+    }
+    p = begin;
+    std::string value;
+    for (++p; p < object.size(); ++p) {
+        if (object[p] == '"' && (p == 0 || object[p - 1] != '\\')) break;
+        if (object[p] == '\\' && p + 1 < object.size()) ++p;
+        value.push_back(object[p]);
+    }
+    return value;
+}
+
+std::vector<std::string> json_objects(const std::string& json) {
+    std::vector<std::string> result;
+    std::size_t start = 0;
+    while ((start = json.find('{', start)) != std::string::npos) {
+        int depth = 0;
+        bool quoted = false;
+        for (std::size_t p = start; p < json.size(); ++p) {
+            if (json[p] == '"' && (p == 0 || json[p - 1] != '\\')) quoted = !quoted;
+            if (quoted) continue;
+            if (json[p] == '{') ++depth;
+            if (json[p] == '}' && --depth == 0) {
+                result.push_back(json.substr(start, p - start + 1));
+                start = p + 1;
+                break;
+            }
+        }
+        if (start == 0) break;
+    }
+    return result;
+}
+
+std::string stream_url(const XtreamSource& source, const std::string& object, bool vod) {
+    const std::string id = json_string(object, "stream_id");
+    const std::string type = json_string(object, "stream_type");
+    if (id.empty()) return {};
+    return source.base_url + "/" + (vod ? "movie" : (type.empty() ? "live" : type)) +
+           "/" + source.username + "/" + source.password + "/" + id +
+           (vod ? ".mp4" : ".ts");
+}
 }
 
 Playlist M3uParser::parse(const std::string& input, const std::string& fallback_name) {
@@ -117,6 +169,60 @@ Playlist M3uParser::parse(const std::string& input, const std::string& fallback_
             pending = {};
             have_info = false;
         }
+    }
+    return result;
+}
+
+bool XtreamParser::parse_source(const std::string& source, XtreamSource& result) {
+    const auto scheme = source.find("://");
+    if (scheme == std::string::npos) return false;
+    const auto authority_start = scheme + 3;
+    const auto first_slash = source.find('/', authority_start);
+    if (first_slash == std::string::npos) return false;
+    const auto at = source.find('@', authority_start);
+    if (at != std::string::npos && at < first_slash) {
+        const auto colon = source.find(':', authority_start);
+        if (colon == std::string::npos || colon > at) return false;
+        result.base_url = source.substr(0, scheme + 3) + source.substr(at + 1, first_slash - at - 1);
+        result.username = source.substr(authority_start, colon - authority_start);
+        result.password = source.substr(colon + 1, at - colon - 1);
+    } else {
+        const auto second_slash = source.find('/', first_slash + 1);
+        if (second_slash == std::string::npos) return false;
+        result.base_url = source.substr(0, first_slash);
+        if (result.base_url.rfind("xtream://", 0) == 0) result.base_url.replace(0, 9, "http://");
+        result.username = source.substr(first_slash + 1, second_slash - first_slash - 1);
+        result.password = source.substr(second_slash + 1);
+    }
+    while (!result.base_url.empty() && result.base_url.back() == '/') result.base_url.pop_back();
+    return !result.username.empty() && !result.password.empty();
+}
+
+Playlist XtreamParser::parse_live(const std::string& json, const XtreamSource& source,
+                                  const std::string& fallback_name) {
+    Playlist result; result.name = fallback_name;
+    for (const auto& object : json_objects(json)) {
+        Channel channel;
+        channel.name = json_string(object, "name");
+        channel.group = json_string(object, "category_name");
+        channel.logo = json_string(object, "stream_icon");
+        channel.tvg_id = json_string(object, "epg_channel_id");
+        channel.url = stream_url(source, object, false);
+        if (!channel.name.empty() && !channel.url.empty()) result.channels.push_back(std::move(channel));
+    }
+    return result;
+}
+
+Playlist XtreamParser::parse_vod(const std::string& json, const XtreamSource& source,
+                                 const std::string& fallback_name) {
+    Playlist result; result.name = fallback_name;
+    for (const auto& object : json_objects(json)) {
+        Channel channel;
+        channel.name = json_string(object, "name");
+        channel.group = json_string(object, "category_name");
+        channel.logo = json_string(object, "stream_icon");
+        channel.url = stream_url(source, object, true);
+        if (!channel.name.empty() && !channel.url.empty()) result.channels.push_back(std::move(channel));
     }
     return result;
 }

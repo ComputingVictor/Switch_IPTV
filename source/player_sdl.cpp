@@ -100,6 +100,11 @@ std::string Player::subtitle_text() const {
     return clock_ms() < subtitle_until_ms_ ? subtitle_text_ : std::string{};
 }
 
+Player::Frame Player::frame() const {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return Frame{pixels_, frame_width_, frame_height_};
+}
+
 void Player::next_audio_track() {
     std::lock_guard<std::mutex> lock(state_mutex_);
     if (!audio_tracks_.empty()) requested_audio_ = (requested_audio_.load() + 1) % audio_tracks_.size();
@@ -114,6 +119,11 @@ void Player::next_subtitle_track() {
 }
 
 void Player::load(const std::string& url, const std::string& agent, const std::string& referrer) {
+    if ((SDL_WasInit(SDL_INIT_AUDIO) & SDL_INIT_AUDIO) == 0 && SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
+        set_error("Could not initialize audio");
+        active_ = false;
+        return;
+    }
     stop();
     stop_requested_ = false;
     active_ = true;
@@ -157,12 +167,12 @@ void Player::render(const SDL_Rect& destination) {
         SDL_UpdateTexture(texture_, nullptr, pixels_.data(), frame_width_ * 4);
         frame_ready_ = false;
     }
-    // Cover the complete display without stretching: crop only the excess
-    // from the source, like a television's zoom/fill mode.
     SDL_Rect source{0, 0, frame_width_, frame_height_};
-    const float source_aspect = static_cast<float>(frame_width_) / frame_height_;
+    float source_aspect = static_cast<float>(frame_width_) / frame_height_;
+    if (aspect_ == Aspect::SixteenByNine) source_aspect = 16.0f / 9.0f;
+    if (aspect_ == Aspect::FourByThree) source_aspect = 4.0f / 3.0f;
     const float target_aspect = static_cast<float>(destination.w) / destination.h;
-    if (source_aspect > target_aspect) {
+    if (aspect_ == Aspect::Fill || source_aspect > target_aspect) {
         source.w = static_cast<int>(frame_height_ * target_aspect);
         source.x = (frame_width_ - source.w) / 2;
     } else {
@@ -276,6 +286,11 @@ void Player::decode(std::string url, std::string agent, std::string referrer) {
                         std::uint8_t* output[] = {rgba.data(), nullptr, nullptr, nullptr};
                         int strides[] = {frame->width * 4, 0, 0, 0};
                         sws_scale(scaler, frame->data, frame->linesize, 0, frame->height, output, strides);
+                        // NanoVG blends uploaded RGBA textures using their alpha channel.
+                        // Some hardware decoders leave the converted alpha byte undefined,
+                        // which made valid video frames render fully transparent on Switch.
+                        for (std::size_t pixel = 3; pixel < rgba.size(); pixel += 4)
+                            rgba[pixel] = 255;
                         if (frame->best_effort_timestamp != AV_NOPTS_VALUE) {
                             const double pts = frame->best_effort_timestamp * av_q2d(input->streams[video_stream]->time_base);
                             if (first_video_pts < 0.0) { first_video_pts = pts; video_clock = std::chrono::steady_clock::now(); }

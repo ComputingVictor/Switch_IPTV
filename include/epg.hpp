@@ -16,6 +16,7 @@ public:
     ~EpgGuide();
     void load_async(const std::string& url);
     std::string now(const std::string& channel_id) const;
+    std::string next(const std::string& channel_id) const;
     bool loading() const { return loading_.load(); }
 private:
     void stop();

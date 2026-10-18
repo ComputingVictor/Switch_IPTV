@@ -2,12 +2,16 @@
 
 #include <set>
 #include <string>
+#include <vector>
 
 namespace switchiptv {
 
 struct Settings {
     std::string playlist_source;
     std::string playlist_name = "My IPTV";
+    std::string epg_source;
+    std::vector<std::string> additional_sources;
+    std::set<std::string> hidden_groups;
 };
 
 class Storage {

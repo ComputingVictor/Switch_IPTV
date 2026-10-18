@@ -20,13 +20,23 @@ int main() {
     assert(p.channels[0].catchup_source == "?utc={utc}" && p.channels[0].timeshift == "2");
     assert(p.channels[1].group == "Radio" && p.channels[1].radio);
     assert(p.channels[1].referrer == "https://example.test/");
+    XtreamSource xtream;
+    assert(XtreamParser::parse_source("xtream://example.test:8080/user/pass", xtream));
+    auto live = XtreamParser::parse_live(
+        R"([{"name":"Channel One","category_name":"News","stream_id":42,"stream_icon":"https://img/logo.png","epg_channel_id":"news.one"}])",
+        xtream);
+    assert(live.channels.size() == 1);
+    assert(live.channels[0].url == "http://example.test:8080/live/user/pass/42.ts");
     const auto dir = std::filesystem::temp_directory_path() / "switchiptv-core-test";
     std::filesystem::remove_all(dir);
     Storage storage(dir.string());
     Settings s{"https://example.test/list.m3u", "Demo=IPTV"};
+    s.additional_sources.push_back("xtream://example.test:8080/user/pass");
+    s.hidden_groups.insert("Adult");
     assert(storage.save_settings(s));
     auto loaded = storage.load_settings();
     assert(loaded.playlist_source == s.playlist_source && loaded.playlist_name == s.playlist_name);
+    assert(loaded.additional_sources == s.additional_sources && loaded.hidden_groups == s.hidden_groups);
     std::set<std::string> fav{"https://example.test/live.m3u8"};
     assert(storage.save_favorites(fav));
     assert(storage.load_favorites() == fav);

@@ -1,0 +1,49 @@
+<brls:Box
+    axis="column"
+    paddingTop="48"
+    paddingBottom="48"
+    paddingLeft="72"
+    paddingRight="72">
+
+    <brls:Label
+        width="auto"
+        height="auto"
+        text="SWITCH IPTV"
+        fontSize="42"
+        horizontalAlign="left" />
+
+    <brls:Label
+        width="auto"
+        height="auto"
+        marginTop="12"
+        text="Your TV. Your channels."
+        fontSize="22"
+        horizontalAlign="left" />
+
+    <brls:Separator marginTop="32" marginBottom="24" />
+
+    <brls:Label
+        width="auto"
+        height="auto"
+        text="LIVE TV"
+        fontSize="30"
+        horizontalAlign="left" />
+
+    <brls:Label
+        width="auto"
+        height="auto"
+        marginTop="12"
+        text="Select a provider to browse channels, favourites and programme information."
+        fontSize="20"
+        horizontalAlign="left" />
+
+    <brls:Label
+        id="status"
+        width="auto"
+        height="auto"
+        marginTop="36"
+        text="Loading provider..."
+        fontSize="18"
+        horizontalAlign="left" />
+
+</brls:Box>

@@ -33,4 +33,19 @@ public:
     static Playlist parse(const std::string& text, const std::string& fallback_name = "Playlist");
 };
 
+struct XtreamSource {
+    std::string base_url;
+    std::string username;
+    std::string password;
+};
+
+class XtreamParser {
+public:
+    static bool parse_source(const std::string& source, XtreamSource& result);
+    static Playlist parse_live(const std::string& json, const XtreamSource& source,
+                               const std::string& fallback_name = "Xtream Live");
+    static Playlist parse_vod(const std::string& json, const XtreamSource& source,
+                              const std::string& fallback_name = "Xtream VOD");
+};
+
 } // namespace switchiptv
